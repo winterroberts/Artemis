@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.TreeMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 import net.aionstudios.artemis.data.DataEntry;
 import net.aionstudios.artemis.data.DataSet;
@@ -15,7 +16,10 @@ import net.aionstudios.artemis.population.Population;
 
 public class PopulationTrainer {
 	
-	public static float train(Population population, DataSet trainSet, IErrorFunction errorFunction) {
+	public static float train(Population population, DataSet trainSet, IErrorFunction errorFunction, float trainSubset, boolean threadded) {
+		if(trainSubset<=0f||trainSubset>1.0f) {
+			throw new NetworkParameterException("Training subset must be between 0.0 and 1.0");
+		}
 		if(population.getSchematic().getInputLayerHeight()!=trainSet.getInputs()) {
 			throw new NetworkParameterException("Network expected "+population.getSchematic().getInputLayerHeight()+" inputs, but received "+trainSet.getInputs()+"!");
 		}
@@ -24,20 +28,70 @@ public class PopulationTrainer {
 		}
 		List<Float> errs = new LinkedList<>();
 		List<Network> errNets = new LinkedList<>();
-		for(Network n : population.getIndividuals()) {
-			float errorSum = 0f;
-			for(int i = 0; i < trainSet.countEntries(); i++) {
-				DataEntry d = trainSet.getEntry(i);
-				float error = errorFunction.calculate(n.execute(d.getInputs()), d.getOutputs());
-				errorSum += error;
+		if(threadded) {
+			int cores = Runtime.getRuntime().availableProcessors();
+			int perThread = (int) Math.ceil((double) population.getIndividuals().length/cores);
+			List<Thread> threads = new LinkedList<>();
+			ReentrantLock tLock = new ReentrantLock();
+			for(int t = 0; t < cores; t++) {
+				final int ti = t;
+				Thread r = new Thread(new Runnable(){
+
+					@Override
+					public void run() {
+						for(int j = 0; j < perThread; j++) {
+							int id = perThread*ti+j;
+							if(id<population.getIndividuals().length) {
+								float errorSum = 0f;
+								Network n = population.getIndividuals()[id];
+								for(int i = 0; i < trainSet.countEntries(); i++) {
+									if(n.getRand().nextFloat()<trainSubset) {
+										DataEntry d = trainSet.getEntry(i);
+										float error = errorFunction.calculate(n.execute(d.getInputs()), d.getOutputs());
+										errorSum += error;
+									}
+								}
+								errorSum /= (float) trainSet.countEntries();
+								int idx = 0;
+								tLock.lock();
+								while(errs.size()>idx&&errs.get(idx)<errorSum) {
+									idx++;
+								}
+								errs.add(idx, errorSum);
+								errNets.add(idx, n);
+								tLock.unlock();
+							}
+						}
+					}
+						
+				});
+				r.setName("ArtemisTrain-"+t);
+				threads.add(r);
+				r.start();
 			}
-			errorSum /= (float) trainSet.countEntries();
-			int idx = 0;
-			while(errs.size()>idx&&errs.get(idx)<errorSum) {
-				idx++;
+			for(Thread r : threads) {
+				while(r.isAlive()) {
+					
+				}
 			}
-			errs.add(idx, errorSum);
-			errNets.add(idx, n);
+		} else {
+			for(Network n : population.getIndividuals()) {
+				float errorSum = 0f;
+				for(int i = 0; i < trainSet.countEntries(); i++) {
+					if(n.getRand().nextFloat()<trainSubset) {
+						DataEntry d = trainSet.getEntry(i);
+						float error = errorFunction.calculate(n.execute(d.getInputs()), d.getOutputs());
+						errorSum += error;
+					}
+				}
+				errorSum /= (float) trainSet.countEntries();
+				int idx = 0;
+				while(errs.size()>idx&&errs.get(idx)<errorSum) {
+					idx++;
+				}
+				errs.add(idx, errorSum);
+				errNets.add(idx, n);
+			}
 		}
 		int retain = (int) Math.floor(population.getGenerationRetainment()*population.getIndividuals().length);
 		List<Network> nextGen = errNets.subList(0, retain);
@@ -54,6 +108,10 @@ public class PopulationTrainer {
 			population.getIndividuals()[i] = nextGen.get(i);
 		}
 		return errs != null?errs.get(0):1.0f;
+	}
+	
+	public static float train(Population population, DataSet trainSet, IErrorFunction errorFunction, boolean threadded) {
+		return train(population, trainSet, errorFunction, 1.0f, threadded);
 	}
 
 }
